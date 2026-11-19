@@ -10,7 +10,6 @@
 
 #include <set>
 
-#include <cwchar>
 #include <cwctype>
 
 namespace {
@@ -256,17 +255,25 @@ void PollPelta(PollContext& ctx) {
 // notes it is not live). A level of 0 is treated as not reported. With both earbuds in the closed
 // case the dongle answers FF AA, shown as asleep.
 //
-// ROG Cetra True Wireless SpeedNova (0B05:1AD3, interface 3 per its Windows driver hardware id
-// USB\VID_0B05&PID_1AD3&MI_03) uses the same SpeedNova dongle family, so it is queried the same
-// way. NOT verified on hardware yet: if the numbers do not match Armoury Crate, send --dump.
+// ROG Cetra True Wireless SpeedNova (0B05:1AD3, same collection) answers differently: sub 12 gives
+// FF AA even while the earbuds are connected, and the levels are behind sub 07:
+//   CC 12 07 -> CC 12 07 00 00 [5] sleep min [6] left % [7] right % [8] case %
+//   CC 12 08 -> CC 12 08 00 00 [5] 1 = charging
+// Seen on a connected pair: [5..8] = 05 54 53 53 (84 / 83 / 83). Which byte is which earbud is
+// read from that one sample and still has to be confirmed against the vendor software.
 struct EarbudModel {
     USHORT pid;
     const wchar_t* name;
+    BYTE sub;       // battery query sub command
+    int left;       // byte offsets (report id counted) of left / right / case level
+    int right;
+    int box;
+    bool chargeQuery;  // charging state is a separate sub 08 query
 };
 
 const EarbudModel kEarbuds[] = {
-    { 0x1CAC, L"ROG Cetra Open Wireless" },
-    { 0x1AD3, L"ROG Cetra True Wireless SpeedNova" },
+    { 0x1CAC, L"ROG Cetra Open Wireless", 0x12, 5, 6, 7, false },
+    { 0x1AD3, L"ROG Cetra True Wireless SpeedNova", 0x07, 6, 7, 8, true },
 };
 
 void PollCetraEarbuds(PollContext& ctx, const EarbudModel& model) {
@@ -279,7 +286,7 @@ void PollCetraEarbuds(PollContext& ctx, const EarbudModel& model) {
         HidDev d;
         std::vector<BYTE> r;
         if (!d.Open(*c)) continue;
-        Reply res = PeltaQuery(d, 0x12, r);
+        Reply res = PeltaQuery(d, model.sub, r);
         if (res == Reply::None) continue;
         DeviceStatus s;
         s.key = L"rog:" + Hex4(pid) + L":hs";
@@ -287,28 +294,11 @@ void PollCetraEarbuds(PollContext& ctx, const EarbudModel& model) {
         s.kind = DeviceKind::Headset;
         s.via = L"2.4 GHz receiver";
         auto level = [&](int at) { return r.size() > (size_t)at && r[at] > 0 && r[at] <= 100 ? (int)r[at] : -1; };
-        int left = res == Reply::Ok ? level(5) : -1;
-        int right = res == Reply::Ok ? level(6) : -1;
-        int box = res == Reply::Ok ? level(7) : -1;
+        int left = res == Reply::Ok ? level(model.left) : -1;
+        int right = res == Reply::Ok ? level(model.right) : -1;
+        int box = res == Reply::Ok ? level(model.box) : -1;
         if (left < 0 && right < 0) {
             s.asleep = true;
-            // TEMPORARY diagnostics for the SpeedNova earbuds: show the raw answers (bytes 0..15).
-            auto hex = [](const std::vector<BYTE>& v) {
-                std::wstring o;
-                for (size_t i = 0; i < v.size() && i < 16; i++) {
-                    wchar_t b[4];
-                    swprintf(b, 4, L"%02X", v[i]);
-                    o += b;
-                    o += L' ';
-                }
-                return o;
-            };
-            s.detail = L"sub12: " + hex(r);
-            for (BYTE sub : { (BYTE)0x07, (BYTE)0x08 }) {
-                std::vector<BYTE> x;
-                PeltaQuery(d, sub, x);
-                s.detail += L" | sub" + std::wstring(sub == 7 ? L"07: " : L"08: ") + hex(x);
-            }
         } else {
             s.percent = left < 0 ? right : right < 0 ? left : (left < right ? left : right);
             std::wstring detail;
@@ -321,6 +311,10 @@ void PollCetraEarbuds(PollContext& ctx, const EarbudModel& model) {
             part(L"R ", right);
             part(L"case ", box);
             s.detail = detail;
+            if (model.chargeQuery) {
+                std::vector<BYTE> ch;
+                if (PeltaQuery(d, 0x08, ch) == Reply::Ok && ch.size() > 5) s.charging = ch[5] == 1;
+            }
         }
         ctx.out.push_back(s);
         ctx.Claim(0x0B05, pid);
