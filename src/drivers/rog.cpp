@@ -254,8 +254,22 @@ void PollPelta(PollContext& ctx) {
 // the left earbud in the case. The case level is the last one the case reported (Armoury Crate
 // notes it is not live). A level of 0 is treated as not reported. With both earbuds in the closed
 // case the dongle answers FF AA, shown as asleep.
-void PollCetraOpen(PollContext& ctx) {
-    constexpr USHORT pid = 0x1CAC;
+//
+// ROG Cetra True Wireless SpeedNova (0B05:1AD3, interface 3 per its Windows driver hardware id
+// USB\VID_0B05&PID_1AD3&MI_03) uses the same SpeedNova dongle family, so it is queried the same
+// way. NOT verified on hardware yet: if the numbers do not match Armoury Crate, send --dump.
+struct EarbudModel {
+    USHORT pid;
+    const wchar_t* name;
+};
+
+const EarbudModel kEarbuds[] = {
+    { 0x1CAC, L"ROG Cetra Open Wireless" },
+    { 0x1AD3, L"ROG Cetra True Wireless SpeedNova" },
+};
+
+void PollCetraEarbuds(PollContext& ctx, const EarbudModel& model) {
+    const USHORT pid = model.pid;
     if (ctx.IsClaimed(0x0B05, pid)) return;
     auto colls = ctx.Find(0x0B05, pid, [](const HidColl& c) {
         return c.iface == 3 && c.page() == 0xFF00 && c.usage() == 0x0001 && c.inLen() >= 8 && c.outLen() >= 8;
@@ -268,7 +282,7 @@ void PollCetraOpen(PollContext& ctx) {
         if (res == Reply::None) continue;
         DeviceStatus s;
         s.key = L"rog:" + Hex4(pid) + L":hs";
-        s.name = L"ROG Cetra Open Wireless";
+        s.name = model.name;
         s.kind = DeviceKind::Headset;
         s.via = L"2.4 GHz receiver";
         auto level = [&](int at) { return r.size() > (size_t)at && r[at] > 0 && r[at] <= 100 ? (int)r[at] : -1; };
@@ -301,7 +315,7 @@ void PollCetraOpen(PollContext& ctx) {
 void PollRog(PollContext& ctx) {
     std::vector<std::wstring> seen;  // one entry per device name (wired + receiver both present while charging)
     PollPelta(ctx);
-    PollCetraOpen(ctx);
+    for (const EarbudModel& e : kEarbuds) PollCetraEarbuds(ctx, e);
     PollOmni(ctx, seen);
     for (const Model& m : kModels) {
         if (ctx.IsClaimed(0x0B05, m.pid)) continue;
