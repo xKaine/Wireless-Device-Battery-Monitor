@@ -10,6 +10,7 @@
 
 #include <set>
 
+#include <cwchar>
 #include <cwctype>
 
 namespace {
@@ -202,9 +203,9 @@ Reply PeltaQuery(HidDev& d, BYTE cmd, std::vector<BYTE>& reply) {
         if (left > 0) n = d.Read(r, left);
     }
     while (n >= 8) {
-        if (r[0] == 0xCC && r[1] == 0xFF && r[2] == 0xAA) return Reply::Asleep;
+        if (r[0] == 0xCC && r[1] == 0xFF && r[2] == 0xAA) { reply = r; return Reply::Asleep; }
         if (r[0] == 0xCC && r[1] == 0x12) {
-            if (r[5] == 0xFF && r[6] == 0xAA) return Reply::Asleep;
+            if (r[5] == 0xFF && r[6] == 0xAA) { reply = r; return Reply::Asleep; }
             if (r[2] == cmd) { reply = r; return Reply::Ok; }
         }
         int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
@@ -291,6 +292,23 @@ void PollCetraEarbuds(PollContext& ctx, const EarbudModel& model) {
         int box = res == Reply::Ok ? level(7) : -1;
         if (left < 0 && right < 0) {
             s.asleep = true;
+            // TEMPORARY diagnostics for the SpeedNova earbuds: show the raw answers (bytes 0..15).
+            auto hex = [](const std::vector<BYTE>& v) {
+                std::wstring o;
+                for (size_t i = 0; i < v.size() && i < 16; i++) {
+                    wchar_t b[4];
+                    swprintf(b, 4, L"%02X", v[i]);
+                    o += b;
+                    o += L' ';
+                }
+                return o;
+            };
+            s.detail = L"sub12: " + hex(r);
+            for (BYTE sub : { (BYTE)0x07, (BYTE)0x08 }) {
+                std::vector<BYTE> x;
+                PeltaQuery(d, sub, x);
+                s.detail += L" | sub" + std::wstring(sub == 7 ? L"07: " : L"08: ") + hex(x);
+            }
         } else {
             s.percent = left < 0 ? right : right < 0 ? left : (left < right ? left : right);
             std::wstring detail;
